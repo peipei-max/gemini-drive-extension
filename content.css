@@ -103,7 +103,8 @@
 .gmh-btn-danger { background: #7f1d1d; }
 .gmh-btn-danger:hover:not(:disabled) { background: #991b1b; }
 
-.gmh-actions { display: flex; gap: 6px; margin-bottom: 8px; }
+.gmh-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.gmh-actions .gmh-btn { flex: 1 1 auto; white-space: nowrap; }
 
 .gmh-log {
   background: #1e293b;

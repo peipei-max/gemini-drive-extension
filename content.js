@@ -430,8 +430,8 @@ async function waitForGenerated(timeoutMs = GENERATED_TIMEOUT_MS) {
 
 // ---------- 收图：分享链接方案 ----------
 
-function findShareButton() {
-  const root = lastModelResponse() || document;
+function findShareButton(scope) {
+  const root = scope || lastModelResponse() || document;
   const btns = [...root.querySelectorAll("button, a[role='button']")];
   const matches = btns.filter((b) =>
     /share|分享/i.test(`${b.getAttribute("aria-label") || ""}${b.getAttribute("mattooltip") || ""}${b.getAttribute("title") || ""}`) ||
@@ -446,18 +446,11 @@ function closeOverlays() {
   if (closeBtn) closeBtn.click();
 }
 
-async function clickShareAndGetLink() {
-  const btn = findShareButton();
-  if (!btn) throw new Error("找不到分享按钮");
-  btn.scrollIntoView({ block: "center", behavior: "instant" });
-  await sleep(500);
-  btn.click();
-  log("🔗 已点击分享", "blue");
-
-  // 多策略拿链接，最多 15 秒
-  for (let i = 0; i < 30; i++) {
+// 从已打开的分享弹层里提取链接（多策略轮询）
+async function extractShareUrl(timeoutMs = 15000) {
+  for (let i = 0; i < timeoutMs / 500; i++) {
     await sleep(500);
-    // 策略1：弹层里的输入框/文本域已带链接值
+    // 策略1：弹层输入框/文本域已带链接值
     const inputs = [...document.querySelectorAll("input[type='text'], textarea")]
       .map((el) => (el.value || "").trim())
       .filter((v) => /^https?:\/\//.test(v));
@@ -494,7 +487,46 @@ async function clickShareAndGetLink() {
       } catch (e) { /* 剪贴板权限被拒，继续其他策略 */ }
     }
   }
-  throw new Error("点击分享后 15 秒内未拿到链接（弹层若已打开则是提取策略未覆盖该 DOM，请截图发我）");
+  throw new Error("分享弹层已打开但 15 秒内未提取到链接");
+}
+
+async function clickShareAndGetLink(timeoutMs = 15000) {
+  const btn = findShareButton();
+  if (!btn) throw new Error("找不到分享按钮");
+  btn.scrollIntoView({ block: "center", behavior: "instant" });
+  await sleep(500);
+  btn.click();
+  log("🔗 已点击分享", "blue");
+  return extractShareUrl(timeoutMs);
+}
+
+// 把链接按原图名归档进清单（同名覆盖），并标记该页本地完成
+function saveLinkForBase(imgItem, url) {
+  const lines = [...(S.linksByFolder[S.folderId] || [])];
+  const entry = `${imgItem.base}\t${url}`;
+  const idx = lines.findIndex((l) => l.startsWith(imgItem.base + "\t"));
+  if (idx >= 0) lines[idx] = entry; else lines.push(entry);
+  S.linksByFolder[S.folderId] = lines;
+  chrome.storage.local.set({ shareLinksByFolder: S.linksByFolder });
+
+  const page = S.images.indexOf(imgItem) + 1;
+  if (page >= 1) {
+    S.localDone.add(page);
+    S.sessionCompleted.add(page);
+    const map = S.doneByFolder;
+    const arr = new Set(map[S.folderId] || []);
+    arr.add(page);
+    map[S.folderId] = [...arr].sort((a, b) => a - b);
+    S.doneByFolder = map;
+    chrome.storage.local.set({ donePagesByFolder: map });
+  }
+}
+
+async function writeLinksFile() {
+  const lines = S.linksByFolder[S.folderId] || [];
+  if (!lines.length) return;
+  await bg({ type: "saveTextFile", filename: "gemini_share_links/share_links.txt", text: lines.join("\n") + "\n" });
+  log(`💾 share_links.txt 已更新（共 ${lines.length} 条）`, "green");
 }
 
 async function collectShareLink(page) {
@@ -502,34 +534,71 @@ async function collectShareLink(page) {
   log(`🔗 分享链接：${shareUrl}`, "green");
 
   const target = S.images[page - 1];
-
-  // 本地存档：所有链接集中在一个文档，换行分隔（覆盖重写全量）。
-  // 链接清单持久化到 storage，崩溃/重载后重写文件不丢旧链接
-  const lines = [...(S.linksByFolder[S.folderId] || [])];
-  const entry = `${target.base}\t${shareUrl}`;
-  const idx = lines.findIndex((l) => l.startsWith(target.base + "\t"));
-  if (idx >= 0) lines[idx] = entry; else lines.push(entry);
-  S.linksByFolder[S.folderId] = lines;
-  chrome.storage.local.set({ shareLinksByFolder: S.linksByFolder });
-
-  try {
-    // chrome.downloads 在 content script 里不存在，保存动作必须走 background
-    await bg({ type: "saveTextFile", filename: "gemini_share_links/share_links.txt", text: lines.join("\n") + "\n" });
-    log(`💾 链接已汇总: Downloads/gemini_share_links/share_links.txt（共 ${lines.length} 条）`, "green");
-  } catch (e) {
-    log(`⚠️ 本地存档失败：${e.message}`, "amber");
-  }
-
-  // 本地完成标记（按文件夹记账，持久化），下次扫描直接跳过
-  S.localDone.add(page);
-  S.sessionCompleted.add(page);
-  const map = S.doneByFolder;
-  const arr = new Set(map[S.folderId] || []);
-  arr.add(page);
-  map[S.folderId] = [...arr].sort((a, b) => a - b);
-  S.doneByFolder = map;
-  chrome.storage.local.set({ donePagesByFolder: map });
+  saveLinkForBase(target, shareUrl);
+  await writeLinksFile();
   log(`✅ 第 ${page} 页已本地标记完成`, "green");
+}
+
+// 补收集：遍历当前会话的每条回复，逐个点分享拿链接。
+// 页码配对依据：回复前面的用户消息文本里包含原图名（如 p_015，前提是提示词模板带文件名）
+function responsePromptBase(resp) {
+  let el = resp.previousElementSibling;
+  for (let i = 0; i < 3 && el; i++) {
+    const t = el.innerText || "";
+    const hit = S.images.find((im) => im.base && t.includes(im.base));
+    if (hit) return hit;
+    el = el.previousElementSibling;
+  }
+  return null;
+}
+
+async function backfillLinks() {
+  if (S.running) return;
+  S.running = true;
+  S.stopFlag = false;
+  render();
+  try {
+    if (!S.images.length) await loadFolderData();
+    const responses = [...document.querySelectorAll("model-response, .model-response, message-content, .response-container, [data-test-id='model-response']")];
+    if (!responses.length) throw new Error("当前会话里没找到任何回复");
+    log(`🔗 会话中共 ${responses.length} 条回复，开始逐个补收集分享链接...`, "blue");
+    let got = 0, skipped = 0, failed = 0;
+    for (let ri = 0; ri < responses.length; ri++) {
+      if (S.stopFlag) throw new Error("已手动停止");
+      const resp = responses[ri];
+      const baseHit = responsePromptBase(resp);
+      const btn = findShareButton(resp);
+      if (!btn) { log(`↩️ 回复 ${ri + 1} 没有分享按钮，跳过`); continue; }
+      try {
+        btn.scrollIntoView({ block: "center", behavior: "instant" });
+        await sleep(400);
+        btn.click();
+        const url = await extractShareUrl(8000);
+        closeOverlays();
+        await sleep(400);
+        if (baseHit) {
+          saveLinkForBase(baseHit, url);
+          log(`🔗 ${baseHit.name} ← ${url}`, "green");
+          got++;
+        } else {
+          log(`⚠️ 回复 ${ri + 1} 拿到链接但配对不到原图名（提示词里没带文件名）：${url}`, "amber");
+          failed++;
+        }
+      } catch (e) {
+        log(`⚠️ 回复 ${ri + 1} 提取失败：${e.message}`, "amber");
+        closeOverlays();
+        failed++;
+      }
+      await sleep(500);
+    }
+    await writeLinksFile();
+    log(`🔗 补收集结束：配对成功 ${got}，未配对/失败 ${failed}，跳过 ${skipped}`, "green");
+  } catch (e) {
+    log(`❌ 补收集失败：${e.message}`, "red");
+  } finally {
+    S.running = false;
+    render();
+  }
 }
 
 // 注：整话跑在同一个 Gemini 会话里（用户指定），所有分享链接都留在该会话历史中，
@@ -706,6 +775,7 @@ function buildPanel() {
       <button class="gmh-btn gmh-btn-refresh">🔄 重新扫描</button>
       <button class="gmh-btn gmh-btn-skip" title="当前页我已手动处理，不计入流程">⏭ 跳过</button>
       <button class="gmh-btn gmh-btn-export" title="把已收集的分享链接导出为本地 txt">📄 导出</button>
+      <button class="gmh-btn gmh-btn-backfill" title="遍历当前会话所有回复，重新收集每页的分享链接">🔗 补收集</button>
     </div>
     <div class="gmh-log"></div>
   `;
@@ -754,6 +824,7 @@ function buildPanel() {
       log(`❌ 导出失败：${e.message}`, "red");
     }
   });
+  panel.querySelector(".gmh-btn-backfill").addEventListener("click", () => backfillLinks());
 
   document.body.appendChild(ball);
   document.body.appendChild(panel);
