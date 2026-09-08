@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 320px; margin: 0; padding: 14px; font-family: "Microsoft YaHei", system-ui, sans-serif; background: #0f172a; color: #f8fafc; }
+  h1 { font-size: 14px; margin: 0 0 10px; }
+  label { font-size: 12px; color: #94a3b8; display: block; margin-bottom: 4px; }
+  input { width: 100%; box-sizing: border-box; background: #334155; color: #34d399; border: none; border-radius: 6px; padding: 7px 8px; font-size: 13px; margin-bottom: 10px; }
+  button { width: 100%; background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 13px; font-weight: bold; cursor: pointer; }
+  button:hover { background: #1d4ed8; }
+  .status { margin-top: 10px; font-size: 12px; color: #94a3b8; line-height: 1.6; }
+  .ok { color: #34d399; }
+  .err { color: #f87171; }
+  ol { font-size: 11px; color: #94a3b8; line-height: 1.7; padding-left: 18px; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+  <h1>🎨 Gemini 漫画改图助手</h1>
+  <label>Drive 漫画文件夹 ID（从文件夹网址 .../folders/&lt;ID&gt; 里复制）</label>
+  <input id="folderId" placeholder="例如 1AbCdEfGhIjKlMnOpQrStUvWxYz">
+  <button id="save">保存并连接</button>
+  <button id="auth" style="margin-top:8px; background:#059669;">① 首次使用：点击授权 Google Drive</button>
+  <div class="status" id="status"></div>
+  <ol>
+    <li>把该话原图和 GEMINI_WEB_PROMPTS.md 放进上面这个文件夹</li>
+    <li>打开 <b>gemini.google.com/images</b>（生图入口），点右下角悬浮球</li>
+    <li>勾选「全自动连跑」点「发送本页」，剩下交给它</li>
+    <li>成图会存进 Drive 的 edited/ 子目录，命名 001.png…</li>
+  </ol>
+  <script src="popup.js"></script>
+</body>
+</html>

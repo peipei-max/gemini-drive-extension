@@ -1,0 +1,122 @@
+/* 漫画改图助手悬浮面板（全部带 gmh- 前缀，避免污染 Gemini 页面样式） */
+
+.gmh-root {
+  position: fixed;
+  z-index: 999999;
+  font-family: "Microsoft YaHei", system-ui, sans-serif;
+  box-sizing: border-box;
+}
+
+.gmh-ball {
+  right: 24px;
+  bottom: 110px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  color: #fff;
+  font-size: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  user-select: none;
+  transition: transform 0.15s;
+}
+.gmh-ball:hover { transform: scale(1.08); }
+.gmh-ball-active { outline: 3px solid rgba(56, 189, 248, 0.6); }
+
+.gmh-panel {
+  right: 24px;
+  bottom: 170px;
+  width: 340px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: #0f172a;
+  color: #f8fafc;
+  border: 1px solid #475569;
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+.gmh-hidden { display: none; }
+
+.gmh-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.gmh-title { font-weight: bold; font-size: 13px; }
+.gmh-auto-wrap { margin-left: auto; font-size: 11px; color: #94a3b8; }
+.gmh-auto-wrap input { vertical-align: middle; }
+.gmh-collapse { cursor: pointer; color: #94a3b8; padding: 0 4px; font-size: 14px; }
+
+.gmh-progress-row { display: flex; justify-content: flex-end; margin-bottom: 3px; }
+.gmh-progress-num { font-size: 12px; color: #38bdf8; font-weight: bold; }
+
+.gmh-progress-bar {
+  height: 6px;
+  background: #334155;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.gmh-progress-fill { height: 100%; width: 0; background: #34d399; transition: width 0.3s; }
+
+.gmh-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.gmh-page-input {
+  width: 52px;
+  text-align: center;
+  font-size: 16px;
+  font-weight: bold;
+  background: #334155;
+  color: #34d399;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 2px;
+}
+.gmh-total { color: #94a3b8; font-size: 12px; margin-right: auto; }
+.gmh-badge { font-size: 11px; color: #94a3b8; margin-left: auto; }
+.gmh-badge.gmh-text { color: #94a3b8; }
+
+.gmh-btn {
+  background: #334155;
+  color: #f8fafc;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.gmh-btn:hover:not(:disabled) { background: #475569; }
+.gmh-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.gmh-btn-primary { flex: 1; background: #2563eb; font-weight: bold; padding: 8px; font-size: 13px; }
+.gmh-btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+.gmh-btn-danger { background: #7f1d1d; }
+.gmh-btn-danger:hover:not(:disabled) { background: #991b1b; }
+
+.gmh-actions { display: flex; gap: 6px; margin-bottom: 8px; }
+
+.gmh-log {
+  background: #1e293b;
+  border-radius: 8px;
+  padding: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.gmh-line { word-break: break-all; }
+.gmh-text { color: #f8fafc; }
+.gmh-blue { color: #38bdf8; }
+.gmh-green { color: #34d399; }
+.gmh-amber { color: #fbbf24; }
+.gmh-red { color: #f87171; }

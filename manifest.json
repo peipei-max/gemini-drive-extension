@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini 漫画改图助手",
+  "version": "0.1.0",
+  "description": "Gemini 网页版漫画改图自动化：Drive 取原图 → 自动上传/填提示词/发送 → 自动收生成图归档到 Drive edited/ 目录",
+  "permissions": ["identity", "storage", "declarativeNetRequest"],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://www.googleapis.com/*",
+    "https://*.googleusercontent.com/*"
+  ],
+  "oauth2": {
+    "client_id": "905786402431-snhln9j9pvj316mj8reqbuck0lriqi4v.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/drive"]
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gemini 漫画改图助手"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
