@@ -16,6 +16,45 @@ function bg(msg) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---------- 常量配置 ----------
+
+const MAX_SEND_RETRY = 3;
+const MAX_COLLECT_RETRY = 3;
+const MAX_SCAN_RETRY = 3;
+const MAX_FILL_PROMPT_RETRY = 3;
+const SEND_BUTTON_WAIT_SEC = 60;
+const SEND_BUTTON_CHECK_INTERVAL_MS = 1000;
+const SEND_EMPTY_CHECK_SEC = 10;
+const SEND_EMPTY_CHECK_INTERVAL_MS = 500;
+const GENERATED_TIMEOUT_MS = 900000; // 15 分钟
+const CANDIDATE_LOAD_TIMEOUT_MS = 30000;
+const CANDIDATE_CHECK_INTERVAL_MS = 1000;
+const CANDIDATE_STABLE_MS = 5000;
+const IMG_MIN_SIZE = 300;
+const IMG_MIN_FILE_SIZE = 1000; // bytes
+const SCROLL_INTERVAL_TICK = 10;
+const PAGE_PER_CHAT = 5;
+const SLEEP_AFTER_SEND_MS = 2000;
+const SLEEP_AFTER_COLLECT_MS = 3000;
+const SLEEP_BETWEEN_PAGES_MS = 3000;
+const SLEEP_RETRY_MS = 5000;
+const RESUME_DELAY_MS = 10000;
+const LOG_MAX_LINES = 60;
+const FILL_PROMPT_HEAD_LEN = 30;
+const FILL_PROMPT_TAIL_LEN = 40;
+const FILL_PROMPT_SLEEP_BEFORE_MS = 500;
+const FILL_PROMPT_SLEEP_AFTER_MS = 1500;
+const INJECT_IMG_CHECK_MAX_ITER = 20;
+const INJECT_IMG_CHECK_INTERVAL_MS = 500;
+const NEW_CHAT_BTN_WAIT_MS = 2500;
+const NEW_CHAT_FALLBACK_DELAY_MS = 3000;
+
+// ---------- CORS 规则 ID（避免魔法数字）----------
+
+const CORS_RULE_ID = 1;
+
+// ---------- 常量配置（续）----------
+
 // 生图专用入口（用户指定），每次新会话都回到这里
 const IMAGES_URL = "https://gemini.google.com/images";
 
@@ -233,8 +272,8 @@ async function injectImage(imageItem) {
   // 否则兜底到 main 范围时会匹配到历史图片，假阳性放行纯文字请求
   const composer = editor ? (editor.closest("form") || editor.closest("main") || document) : document;
   const beforeImgs = new Set(composer.querySelectorAll("img"));
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
+  for (let i = 0; i < INJECT_IMG_CHECK_MAX_ITER; i++) {
+    await sleep(INJECT_IMG_CHECK_INTERVAL_MS);
     const newImg = [...composer.querySelectorAll("img")].some((im) => !beforeImgs.has(im));
     if (newImg || composer.querySelector("[data-test-id='file-upload-container'], .attachment-preview")) {
       log("✅ 附件已就绪", "green");
@@ -263,17 +302,17 @@ function normalizeText(s) {
 async function fillPrompt(prompt) {
   // 每页提示词开头相同、末尾台词不同——必须同时校验首尾，
   // 否则上一页残留的提示词会被"已存在守卫"误判通过，导致把旧台词发给新图
-  const head = normalizeText(prompt.slice(0, 30));
-  const tail = normalizeText(prompt.slice(-40));
+  const head = normalizeText(prompt.slice(0, FILL_PROMPT_HEAD_LEN));
+  const tail = normalizeText(prompt.slice(-FILL_PROMPT_TAIL_LEN));
   const hasPrompt = (editor) => {
     const t = normalizeText(editor.innerText);
     return t.includes(head) && t.includes(tail);
   };
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < MAX_FILL_PROMPT_RETRY; attempt++) {
     const editor = findEditor();
     if (!editor) {
-      await sleep(1500);
+      await sleep(FILL_PROMPT_SLEEP_AFTER_MS);
       continue;
     }
     if (hasPrompt(editor)) {
@@ -282,18 +321,18 @@ async function fillPrompt(prompt) {
     }
     editor.focus();
     editor.scrollIntoView({ block: "center", behavior: "instant" });
-    await sleep(500);
+    await sleep(FILL_PROMPT_SLEEP_BEFORE_MS);
     // 可靠清空（残留的可能是上一页的提示词，必须清掉）
     document.execCommand("selectAll", false, null);
     document.execCommand("delete", false, null);
-    await sleep(300);
+    await sleep(FILL_PROMPT_SLEEP_AFTER_MS / 5);
     document.execCommand("insertText", false, prompt);
-    await sleep(1500);
+    await sleep(FILL_PROMPT_SLEEP_AFTER_MS);
     if (hasPrompt(editor)) {
       log(`✅ 提示词已填入（第 ${attempt + 1} 次）`, "green");
       return;
     }
-    log(`⚠️ 填入后验证未通过，重试（${attempt + 1}/3）`, "amber");
+    log(`⚠️ 填入后验证未通过，重试（${attempt + 1}/${MAX_FILL_PROMPT_RETRY}）`, "amber");
   }
   throw new Error("提示词未能填入输入框（已重试 3 次）");
 }
@@ -301,21 +340,21 @@ async function fillPrompt(prompt) {
 async function clickSend() {
   const editor = findEditor();
   if (editor) editor.scrollIntoView({ block: "center", behavior: "instant" });
-  await sleep(1000);
+  await sleep(SEND_EMPTY_CHECK_INTERVAL_MS);
 
   // 轮询等按钮出现，最多 60 秒（附件上传完成前按钮常未渲染）
   let btn = null;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < SEND_BUTTON_WAIT_SEC; i++) {
     btn = findSendButton();
     if (btn) break;
-    await sleep(1000);
+    await sleep(SEND_BUTTON_CHECK_INTERVAL_MS);
   }
   if (!btn) throw new Error("找不到发送按钮（已等 60 秒，Gemini DOM 可能已更新，请把页面截图发我）");
   btn.click();
   log("🚀 已点击发送", "blue");
-  // 验证编辑器清空（请求真正发出），最多等 20 秒
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
+  // 验证编辑器清空（请求真正发出），最多等 10 秒
+  for (let i = 0; i < SEND_EMPTY_CHECK_SEC * 2; i++) {
+    await sleep(SEND_EMPTY_CHECK_INTERVAL_MS);
     const ed = findEditor();
     const empty = !ed || (ed.innerText || "").trim().length === 0;
     if (empty) { log("✅ 请求已发出", "green"); return; }
@@ -347,29 +386,29 @@ function findGeneratedCandidates() {
 }
 
 // 等候选图加载完成（处理懒加载），返回真正的大图
-async function waitForCandidatesLoaded(timeoutMs = 30000) {
+async function waitForCandidatesLoaded(timeoutMs = CANDIDATE_LOAD_TIMEOUT_MS) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const cands = findGeneratedCandidates();
     // 把每张候选图依次滚入视口触发加载
     for (const img of cands) {
-      if ((img.naturalWidth || 0) < 300) {
+      if ((img.naturalWidth || 0) < IMG_MIN_SIZE) {
         img.scrollIntoView({ block: "center", behavior: "instant" });
       }
     }
-    await sleep(1500);
+    await sleep(CANDIDATE_CHECK_INTERVAL_MS);
     const loaded = cands.filter((img) => {
       const w = img.naturalWidth || img.width || 0;
       const h = img.naturalHeight || img.height || 0;
-      return w >= 300 && h >= 300;
+      return w >= IMG_MIN_SIZE && h >= IMG_MIN_SIZE;
     });
     if (loaded.length > 0) return loaded;
   }
   return [];
 }
 
-async function waitForGenerated(timeoutMs = 900000) {
-  log("👀 监听生成结果中（候选图稳定 5 秒即收，最长等 15 分钟）...", "blue");
+async function waitForGenerated(timeoutMs = GENERATED_TIMEOUT_MS) {
+  log(`👀 监听生成结果中（候选图稳定 ${CANDIDATE_STABLE_MS/1000} 秒即收，最长等 ${GENERATED_TIMEOUT_MS/60000} 分钟）...`, "blue");
   const start = Date.now();
   let lastSrcKey = "";
   let stableSince = 0;
@@ -377,14 +416,14 @@ async function waitForGenerated(timeoutMs = 900000) {
   while (Date.now() - start < timeoutMs) {
     if (S.stopFlag) throw new Error("已手动停止");
     tick++;
-    // 每 10 秒滚一次底触发懒加载即可，别跟用户抢滚动条
-    if (tick % 10 === 1) scrollToLatestResponse();
-    await sleep(1000);
-    const loaded = await waitForCandidatesLoaded(8000);
+    // 每 SCROLL_INTERVAL_TICK 秒滚一次底触发懒加载即可，别跟用户抢滚动条
+    if (tick % SCROLL_INTERVAL_TICK === 1) scrollToLatestResponse();
+    await sleep(CANDIDATE_CHECK_INTERVAL_MS);
+    const loaded = await waitForCandidatesLoaded(CANDIDATE_LOAD_TIMEOUT_MS / 4);
     const key = loaded.map((i) => i.currentSrc || i.src).sort().join("|");
     if (key && key === lastSrcKey) {
       if (!stableSince) stableSince = Date.now();
-      if (Date.now() - stableSince > 5000) {
+      if (Date.now() - stableSince > CANDIDATE_STABLE_MS) {
         return [...new Set(loaded.map((i) => i.currentSrc || i.src))];
       }
     } else {
@@ -392,7 +431,7 @@ async function waitForGenerated(timeoutMs = 900000) {
       stableSince = 0;
     }
   }
-  throw new Error("等待生成超时（15 分钟），若图已生成请在日志排查");
+  throw new Error(`等待生成超时（${GENERATED_TIMEOUT_MS/60000} 分钟），若图已生成请在日志排查`);
 }
 
 async function collectImages(srcs, page) {
