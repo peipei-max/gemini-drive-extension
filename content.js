@@ -513,15 +513,8 @@ async function collectShareLink(page) {
   chrome.storage.local.set({ shareLinksByFolder: S.linksByFolder });
 
   try {
-    const blob = new Blob([lines.join("\n") + "\n"], { type: "text/plain" });
-    const objUrl = URL.createObjectURL(blob);
-    await chrome.downloads.download({
-      url: objUrl,
-      filename: "gemini_share_links/share_links.txt",
-      conflictAction: "overwrite",
-      saveAs: false,
-    });
-    setTimeout(() => URL.revokeObjectURL(objUrl), 60000);
+    // chrome.downloads 在 content script 里不存在，保存动作必须走 background
+    await bg({ type: "saveTextFile", filename: "gemini_share_links/share_links.txt", text: lines.join("\n") + "\n" });
     log(`💾 链接已汇总: Downloads/gemini_share_links/share_links.txt（共 ${lines.length} 条）`, "green");
   } catch (e) {
     log(`⚠️ 本地存档失败：${e.message}`, "amber");
@@ -712,6 +705,7 @@ function buildPanel() {
       <button class="gmh-btn gmh-btn-danger gmh-btn-stop" disabled>⏹ 停止</button>
       <button class="gmh-btn gmh-btn-refresh">🔄 重新扫描</button>
       <button class="gmh-btn gmh-btn-skip" title="当前页我已手动处理，不计入流程">⏭ 跳过</button>
+      <button class="gmh-btn gmh-btn-export" title="把已收集的分享链接导出为本地 txt">📄 导出</button>
     </div>
     <div class="gmh-log"></div>
   `;
@@ -749,6 +743,16 @@ function buildPanel() {
     if (S.resumeTimer) { clearTimeout(S.resumeTimer); S.resumeTimer = null; } // 停止要连待触发的续跑一起取消
     chrome.storage.local.set({ autoResume: false });
     log("⏹ 已请求停止（等当前步骤结束）", "amber");
+  });
+  panel.querySelector(".gmh-btn-export").addEventListener("click", async () => {
+    const lines = S.linksByFolder[S.folderId] || [];
+    if (!lines.length) { log("⚠️ 当前文件夹还没有已收集的链接", "amber"); return; }
+    try {
+      await bg({ type: "saveTextFile", filename: "gemini_share_links/share_links.txt", text: lines.join("\n") + "\n" });
+      log(`💾 已导出 ${lines.length} 条链接到 Downloads/gemini_share_links/share_links.txt`, "green");
+    } catch (e) {
+      log(`❌ 导出失败：${e.message}`, "red");
+    }
   });
 
   document.body.appendChild(ball);

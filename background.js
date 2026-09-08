@@ -201,6 +201,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
           break;
         }
+        // 保存文本文件。chrome.downloads 只在扩展上下文可用（content script 里是 undefined），
+        // MV3 SW 没有 URL.createObjectURL，用 data URL 交给 downloads API
+        case "saveTextFile": {
+          const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(msg.text)));
+          const dlId = await chrome.downloads.download({
+            url: `data:text/plain;charset=utf-8;base64,${b64}`,
+            filename: msg.filename,
+            conflictAction: "overwrite",
+            saveAs: false,
+          });
+          sendResponse({ ok: true, downloadId: dlId });
+          break;
+        }
         case "upload": {
           sendResponse({ ok: true, file: await uploadFile(msg.folderId, msg.name, msg.mime, msg.data) });
           break;
