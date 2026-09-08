@@ -68,6 +68,7 @@ const S = {
   resumeTimer: null,   // 待触发的自动续跑定时器（点停止/手动单页时必须取消）
   localDone: new Set(),   // 本地完成标记（当前文件夹，chrome.storage 持久化）
   doneByFolder: {},       // 按文件夹记账的本地完成页码，换文件夹互不污染且各自保留
+  linksByFolder: {},      // 按文件夹记账的分享链接清单（"原图名\t链接" 行数组）
   promptsCacheId: "",  // 提示词手册缓存键（按文件 id，避免每页重复下载）
   promptsCache: null,
 };
@@ -501,20 +502,27 @@ async function collectShareLink(page) {
   log(`🔗 分享链接：${shareUrl}`, "green");
 
   const target = S.images[page - 1];
-  const markerBody = `${target.name}\t${shareUrl}\n`;
 
-  // 本地存档：Downloads/gemini_share_links/{原图名}.txt（本地下载脚本的输入）
+  // 本地存档：所有链接集中在一个文档，换行分隔（覆盖重写全量）。
+  // 链接清单持久化到 storage，崩溃/重载后重写文件不丢旧链接
+  const lines = [...(S.linksByFolder[S.folderId] || [])];
+  const entry = `${target.base}\t${shareUrl}`;
+  const idx = lines.findIndex((l) => l.startsWith(target.base + "\t"));
+  if (idx >= 0) lines[idx] = entry; else lines.push(entry);
+  S.linksByFolder[S.folderId] = lines;
+  chrome.storage.local.set({ shareLinksByFolder: S.linksByFolder });
+
   try {
-    const blob = new Blob([markerBody], { type: "text/plain" });
+    const blob = new Blob([lines.join("\n") + "\n"], { type: "text/plain" });
     const objUrl = URL.createObjectURL(blob);
     await chrome.downloads.download({
       url: objUrl,
-      filename: `gemini_share_links/${target.base}.txt`,
+      filename: "gemini_share_links/share_links.txt",
       conflictAction: "overwrite",
       saveAs: false,
     });
     setTimeout(() => URL.revokeObjectURL(objUrl), 60000);
-    log("💾 链接已存本地: Downloads/gemini_share_links/", "green");
+    log(`💾 链接已汇总: Downloads/gemini_share_links/share_links.txt（共 ${lines.length} 条）`, "green");
   } catch (e) {
     log(`⚠️ 本地存档失败：${e.message}`, "amber");
   }
@@ -750,10 +758,11 @@ function buildPanel() {
 
 // ---------- 启动 ----------
 
-chrome.storage.local.get(["folderId", "autoResume", "skippedPages", "skippedFolderId", "donePagesByFolder"], (cfg) => {
+chrome.storage.local.get(["folderId", "autoResume", "skippedPages", "skippedFolderId", "donePagesByFolder", "shareLinksByFolder"], (cfg) => {
   S.folderId = cfg.folderId || "";
   S.doneByFolder = cfg.donePagesByFolder || {};
   S.localDone = new Set(S.doneByFolder[S.folderId] || []);
+  S.linksByFolder = cfg.shareLinksByFolder || {};
   if (cfg.skippedFolderId === S.folderId) {
     S.skipped = new Set(cfg.skippedPages || []);
   } else {
