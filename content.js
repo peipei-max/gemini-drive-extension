@@ -18,10 +18,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- 常量配置 ----------
 
-const MAX_SEND_RETRY = 3;
-const MAX_COLLECT_RETRY = 3;
-const MAX_SCAN_RETRY = 3;
-const MAX_FILL_PROMPT_RETRY = 3;
+const MAX_SEND_RETRY = 3;        // 发送环节重试轮数
+const MAX_COLLECT_RETRY = 3;     // 收图环节重试次数
+const MAX_SCAN_RETRY = 3;        // Drive 扫描重试次数
+const MAX_FILL_PROMPT_RETRY = 3; // 提示词填入重试次数
 const SEND_BUTTON_WAIT_SEC = 60;
 const SEND_BUTTON_CHECK_INTERVAL_MS = 1000;
 const SEND_EMPTY_CHECK_SEC = 10;
@@ -33,27 +33,22 @@ const CANDIDATE_STABLE_MS = 5000;
 const IMG_MIN_SIZE = 300;
 const IMG_MIN_FILE_SIZE = 1000; // bytes
 const SCROLL_INTERVAL_TICK = 10;
-const PAGE_PER_CHAT = 5;
-const SLEEP_AFTER_SEND_MS = 2000;
-const SLEEP_AFTER_COLLECT_MS = 3000;
-const SLEEP_BETWEEN_PAGES_MS = 3000;
-const SLEEP_RETRY_MS = 5000;
-const RESUME_DELAY_MS = 10000;
+const PAGE_PER_CHAT = 5;             // 每跑 N 页换一次会话
+const SLEEP_AFTER_SEND_MS = 2000;    // 发送后等页面进入生成态
+const SLEEP_AFTER_COLLECT_MS = 3000; // 收图重试间隔
+const SLEEP_BETWEEN_PAGES_MS = 3000; // 页与页之间的喘息
+const SLEEP_RETRY_MS = 5000;         // 扫描重试间隔
+const RESUME_DELAY_MS = 10000;       // 续跑前等页面稳定
 const LOG_MAX_LINES = 60;
 const FILL_PROMPT_HEAD_LEN = 30;
 const FILL_PROMPT_TAIL_LEN = 40;
 const FILL_PROMPT_SLEEP_BEFORE_MS = 500;
+const FILL_PROMPT_CLEAR_SLEEP_MS = 300; // 清空编辑器后的等待
 const FILL_PROMPT_SLEEP_AFTER_MS = 1500;
 const INJECT_IMG_CHECK_MAX_ITER = 20;
 const INJECT_IMG_CHECK_INTERVAL_MS = 500;
-const NEW_CHAT_BTN_WAIT_MS = 2500;
-const NEW_CHAT_FALLBACK_DELAY_MS = 3000;
-
-// ---------- CORS 规则 ID（避免魔法数字）----------
-
-const CORS_RULE_ID = 1;
-
-// ---------- 常量配置（续）----------
+const NEW_CHAT_BTN_WAIT_MS = 2500;      // 点新聊天后等会话清空
+const NEW_CHAT_FALLBACK_DELAY_MS = 3000; // 找不到新聊天按钮时的兜底等待
 
 // 生图专用入口（用户指定），每次新会话都回到这里
 const IMAGES_URL = "https://gemini.google.com/images";
@@ -325,7 +320,7 @@ async function fillPrompt(prompt) {
     // 可靠清空（残留的可能是上一页的提示词，必须清掉）
     document.execCommand("selectAll", false, null);
     document.execCommand("delete", false, null);
-    await sleep(FILL_PROMPT_SLEEP_AFTER_MS / 5);
+    await sleep(FILL_PROMPT_CLEAR_SLEEP_MS);
     document.execCommand("insertText", false, prompt);
     await sleep(FILL_PROMPT_SLEEP_AFTER_MS);
     if (hasPrompt(editor)) {
@@ -462,7 +457,7 @@ async function collectImages(srcs, page) {
       log(`⚠️ 一张候选图抓取失败：${e.message}`, "amber");
     }
   }
-  if (!best || best.size < 1000) throw new Error("未能抓到生成图（抓图失败或全是小图）");
+  if (!best || best.size < IMG_MIN_FILE_SIZE) throw new Error("未能抓到生成图（抓图失败或全是小图）");
 
   const ext = mimeToExt(best.mime);
   const dstName = `${target.base}${ext}`;
@@ -525,13 +520,13 @@ async function startNewChat() {
   const btn = findNewChatButton();
   if (!btn) {
     log("⚠️ 未找到「新聊天」按钮，3 秒后跳转生图页", "amber");
-    await sleep(3000);
+    await sleep(NEW_CHAT_FALLBACK_DELAY_MS);
     S.navigating = true; // 主动整页跳转：autoRun 的 finally 不清 autoResume，让新页面接管续跑
     location.href = IMAGES_URL;
     return;
   }
   btn.click();
-  await sleep(2500);
+  await sleep(NEW_CHAT_BTN_WAIT_MS);
   if (location.pathname.startsWith("/images")) {
     log("🆕 已开启新对话（生图页）", "blue");
   } else {
@@ -561,26 +556,26 @@ async function runPage(page) {
   await fillPrompt(prompt);
   await sleep(1000);
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < MAX_SEND_RETRY; attempt++) {
     try {
       await clickSend();
       break;
     } catch (e) {
       log(`⚠️ 发送失败：${e.message}（第 ${attempt + 1} 次）`, "amber");
-      if (attempt === 2) throw new Error("发送环节连续失败（已重试 3 轮）");
+      if (attempt === MAX_SEND_RETRY - 1) throw new Error(`发送环节连续失败（已重试 ${MAX_SEND_RETRY} 轮）`);
       await sleep(2000);
     }
   }
 
-  await sleep(2000); // 等请求真正发出、页面进入生成态
+  await sleep(SLEEP_AFTER_SEND_MS); // 等请求真正发出、页面进入生成态
 
   const srcs = await waitForGenerated();
 
   // 收图带重试：签名 URL 会轮换/瞬时 403，重试时重新检测最新候选图
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < MAX_COLLECT_RETRY; attempt++) {
     if (attempt > 0) {
-      log(`🔄 收图重试（${attempt + 1}/3，重新检测候选图）...`, "amber");
-      await sleep(3000);
+      log(`🔄 收图重试（${attempt + 1}/${MAX_COLLECT_RETRY}，重新检测候选图）...`, "amber");
+      await sleep(SLEEP_AFTER_COLLECT_MS);
     }
     const grabSrcs = attempt === 0
       ? srcs
@@ -590,7 +585,7 @@ async function runPage(page) {
       break;
     } catch (e) {
       log(`⚠️ ${e.message}`, "amber");
-      if (attempt === 2) throw new Error("收图连续失败（已重试 3 次）");
+      if (attempt === MAX_COLLECT_RETRY - 1) throw new Error(`收图连续失败（已重试 ${MAX_COLLECT_RETRY} 次）`);
     }
   }
 }
@@ -603,15 +598,15 @@ async function autoRun() {
   chrome.storage.local.set({ autoResume: true });
   render();
   try {
-    let pagesSinceChat = 0; // 每 5 页左右才换一次会话，同会话旧图靠快照排除
+    let pagesSinceChat = 0; // 每 PAGE_PER_CHAT 页换一次会话，同会话旧图靠快照排除
     while (!S.stopFlag) {
       // 扫描加重试：瞬时 Drive 网络错误不该杀掉整条链
       let loaded = false;
-      for (let i = 0; i < 3 && !S.stopFlag; i++) {
+      for (let i = 0; i < MAX_SCAN_RETRY && !S.stopFlag; i++) {
         try { await loadFolderData(); loaded = true; break; }
-        catch (e) { log(`⚠️ 扫描失败：${e.message}（${i + 1}/3，5 秒后重试）`, "amber"); await sleep(5000); }
+        catch (e) { log(`⚠️ 扫描失败：${e.message}（${i + 1}/${MAX_SCAN_RETRY}，${SLEEP_RETRY_MS / 1000} 秒后重试）`, "amber"); await sleep(SLEEP_RETRY_MS); }
       }
-      if (!loaded) { log("❌ 连续 3 次扫描失败，已暂停。", "red"); break; }
+      if (!loaded) { log(`❌ 连续 ${MAX_SCAN_RETRY} 次扫描失败，已暂停。`, "red"); break; }
       let remaining = 0;
       for (let p = 1; p <= S.total; p++) if (!isDone(p)) remaining++;
       if (remaining === 0) { log("🎊 全部完成！", "green"); break; }
@@ -619,18 +614,18 @@ async function autoRun() {
       try {
         await runPage(page);
         pagesSinceChat++;
-        if (pagesSinceChat >= 5) {
+        if (pagesSinceChat >= PAGE_PER_CHAT) {
           await startNewChat();
           pagesSinceChat = 0;
         } else {
-          log(`📌 收图完成，同一会话继续（本轮已连跑 ${pagesSinceChat}/5 页）`, "blue");
+          log(`📌 收图完成，同一会话继续（本轮已连跑 ${pagesSinceChat}/${PAGE_PER_CHAT} 页）`, "blue");
         }
       } catch (e) {
         log(`❌ 第 ${page} 页失败：${e.message}`, "red");
         log("已暂停。排查后可再点「发送本页」重试。", "amber");
         break;
       }
-      await sleep(3000); // 给 Gemini 一点喘息
+      await sleep(SLEEP_BETWEEN_PAGES_MS); // 给 Gemini 一点喘息
     }
   } finally {
     S.running = false;
@@ -666,7 +661,7 @@ function log(text, color = "text") {
   line.className = `gmh-line gmh-${color}`;
   line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
   box.prepend(line);
-  while (box.children.length > 60) box.lastChild.remove();
+  while (box.children.length > LOG_MAX_LINES) box.lastChild.remove();
 }
 
 function render() {
@@ -776,7 +771,7 @@ chrome.storage.local.get(["folderId", "autoResume", "skippedPages", "skippedFold
     loadFolderData().catch((e) => log(`❌ ${e.message}`, "red"));
     if (cfg.autoResume) {
       log("🔁 检测到上次全自动运行被页面跳转中断，10 秒后自动续跑...", "amber");
-      S.resumeTimer = setTimeout(() => { if (!S.stopFlag) autoRun(); }, 10000);
+      S.resumeTimer = setTimeout(() => { if (!S.stopFlag) autoRun(); }, RESUME_DELAY_MS);
     }
   } else {
     log("⚠️ 尚未配置 Drive 文件夹 ID：点浏览器右上角扩展图标进行配置", "amber");

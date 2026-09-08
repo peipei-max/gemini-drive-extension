@@ -1,1 +1,9 @@
-(content.js is a source file, and there are no build artifacts, dependencies, or temp files in the changes)
+# macOS
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
+
+# 打包产物
+*.zip

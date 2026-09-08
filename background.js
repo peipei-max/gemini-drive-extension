@@ -9,8 +9,9 @@ const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
 // MV3 Service Worker 的 fetch 跟随 302 重定向后 CORS 校验会重新生效，
 // 而 lh3.googleusercontent.com 的生成图下载链（/gg-dl/ -> /rd-gg-dl/）不返回 CORS 头。
 // 用 declarativeNetRequest 给所有 googleusercontent 的响应强制注入 ACAO 头，一劳永逸。
+const CORS_RULE_ID = 1;
 const CORS_RULE = {
-  id: 1,
+  id: CORS_RULE_ID,
   priority: 1,
   action: {
     type: "modifyHeaders",
@@ -31,7 +32,7 @@ const CORS_RULE = {
 
 async function ensureCorsRule() {
   await chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds: [CORS_RULE.id],
+    removeRuleIds: [CORS_RULE_ID],
     addRules: [CORS_RULE],
   });
 }
