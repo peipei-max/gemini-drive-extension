@@ -9,10 +9,12 @@
 Drive 取原图 ──> 注入 Gemini 输入框（原生文件通道）──> 自动填提示词 ──> 自动点发送
      ▲                                                            │
      │                                                            ▼
-Drive edited/001.png ◄──────── 抓取生成图并上传 ◄──────── 监听生成完成
+本地 Downloads/gemini_share_links/*.txt ◄──── 点分享按钮拿公开链接 ◄──── 监听生成完成
 ```
 
-人工操作只剩：每话开始前把原图 + 提示词手册拖进 Drive 文件夹，结束后把 `edited/` 拖回本地给 `build_reader.py` 编译。
+- 整话跑在**同一个 Gemini 会话**里，所有分享链接都留在该会话历史中
+- 完成标记**只存本地**（chrome.storage，按文件夹记账），Drive 只读不写
+- 人工收尾：跑 `download_share_images.py` 把链接批量下载成图片放进 `edited/`，再 `build_reader.py` 编译
 
 ## 目录结构
 

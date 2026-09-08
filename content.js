@@ -32,9 +32,8 @@ const CANDIDATE_CHECK_INTERVAL_MS = 1000;
 const CANDIDATE_STABLE_MS = 5000;
 const IMG_MIN_SIZE = 300;
 const SCROLL_INTERVAL_TICK = 10;
-const PAGE_PER_CHAT = 5;             // 每跑 N 页换一次会话
 const SLEEP_AFTER_SEND_MS = 2000;    // 发送后等页面进入生成态
-const SLEEP_AFTER_COLLECT_MS = 3000; // 收图重试间隔
+const SLEEP_AFTER_COLLECT_MS = 3000; // 分享收图重试间隔
 const SLEEP_BETWEEN_PAGES_MS = 3000; // 页与页之间的喘息
 const SLEEP_RETRY_MS = 5000;         // 扫描重试间隔
 const RESUME_DELAY_MS = 10000;       // 续跑前等页面稳定
@@ -46,8 +45,6 @@ const FILL_PROMPT_CLEAR_SLEEP_MS = 300; // 清空编辑器后的等待
 const FILL_PROMPT_SLEEP_AFTER_MS = 1500;
 const INJECT_IMG_CHECK_MAX_ITER = 20;
 const INJECT_IMG_CHECK_INTERVAL_MS = 500;
-const NEW_CHAT_BTN_WAIT_MS = 2500;      // 点新聊天后等会话清空
-const NEW_CHAT_FALLBACK_DELAY_MS = 3000; // 找不到新聊天按钮时的兜底等待
 
 // 生图专用入口（用户指定），每次新会话都回到这里
 const IMAGES_URL = "https://gemini.google.com/images";
@@ -69,7 +66,8 @@ const S = {
   autoMode: false,
   sentImageElements: new Set(), // 发送前页面里已有的 img 元素，用于识别新生成图（记元素而非 URL）
   resumeTimer: null,   // 待触发的自动续跑定时器（点停止/手动单页时必须取消）
-  navigating: false,   // 正在主动整页跳转（true 时 autoRun finally 不清 autoResume）
+  localDone: new Set(),   // 本地完成标记（当前文件夹，chrome.storage 持久化）
+  doneByFolder: {},       // 按文件夹记账的本地完成页码，换文件夹互不污染且各自保留
   promptsCacheId: "",  // 提示词手册缓存键（按文件 id，避免每页重复下载）
   promptsCache: null,
 };
@@ -137,9 +135,9 @@ function naturalSort(a, b) {
   return 0;
 }
 
-// 页面是否已处理（Drive 成图 / 本会话刚完成 / 手动跳过，任一即算）
+// 页面是否已处理（Drive 历史成图 / 本会话刚完成 / 本地完成标记 / 手动跳过，任一即算）
 function isDone(p) {
-  return S.completed.has(p) || S.sessionCompleted.has(p) || S.skipped.has(p);
+  return S.completed.has(p) || S.sessionCompleted.has(p) || S.localDone.has(p) || S.skipped.has(p);
 }
 
 async function loadFolderData() {
@@ -198,16 +196,17 @@ async function loadFolderData() {
     }
   }
 
-  // 定位最新未处理页：Drive 成图 / 本会话刚完成 / 手动跳过 都算"已处理"，
-  // 但计数只显示 Drive 成图数，跳过的单独标出（避免"没跑就显示已完成N页"的困惑）
+  // 定位最新未处理页：Drive 历史成图 / 本会话刚完成 / 本地完成标记 / 手动跳过 都算"已处理"
   S.current = 1;
   for (let p = 1; p <= S.total; p++) {
     if (!isDone(p)) { S.current = p; break; }
     if (p === S.total) S.current = S.total;
   }
+  let handled = 0;
+  for (let p = 1; p <= S.total; p++) if (isDone(p) && !S.skipped.has(p)) handled++;
 
   const skipExtra = S.skipped.size ? `（另有手动跳过 ${S.skipped.size} 页）` : "";
-  log(`✅ 共 ${S.total} 页，已完成 ${S.completed.size} 页${skipExtra}，当前第 ${S.current} 页（提示词 ${Object.keys(S.prompts).length} 条）`, "green");
+  log(`✅ 共 ${S.total} 页，已处理 ${handled} 页${skipExtra}，当前第 ${S.current} 页（提示词 ${Object.keys(S.prompts).length} 条）`, "green");
   render();
 }
 
@@ -429,14 +428,6 @@ async function waitForGenerated(timeoutMs = GENERATED_TIMEOUT_MS) {
 }
 
 // ---------- 收图：分享链接方案 ----------
-// /images 面的生成图下载链是 cookie 门禁 + 浏览器原生下载也被拒（实测），
-// 直接抓字节走不通。改走分享链路：
-//   点图片上的分享按钮 -> 拿公开分享链接 -> ① 上传 Drive edited/ 作完成标记
-//   ② 存本地 Downloads/gemini_share_links/ 供之后逐一下载
-
-function textToBase64(s) {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
-}
 
 function findShareButton() {
   const root = lastModelResponse() || document;
@@ -473,13 +464,23 @@ async function clickShareAndGetLink() {
       closeOverlays();
       return inputs.sort((a, b) => b.length - a.length)[0];
     }
-    // 策略2：分享弹层里出现链接锚点
-    const anchors = [...document.querySelectorAll("a[href^='https://']")
-      ].map((a) => a.href)
-      .filter((h) => /share\.google|g\.co|goo\.gl|gemini\.google\.com\/share/.test(h));
+    // 策略2：分享链接锚点。实测弹层链接域名为 share.gemini.google（注意
+    // 不能用 share.google 匹配——"share.gemini.google" 里不含 "share.google" 子串）
+    const anchors = [...document.querySelectorAll("a[href]")]
+      .map((a) => a.href)
+      .filter((h) => /share\.gemini\.google|share\.google|gemini\.google\.com\/share/i.test(h));
     if (anchors.length) {
       closeOverlays();
-      return anchors[0];
+      return anchors[anchors.length - 1];
+    }
+    // 策略2b：锚点可见文本是链接形态（href 被前端改写时的兜底）
+    const textLinks = [...document.querySelectorAll("a")]
+      .map((a) => (a.textContent || "").trim())
+      .filter((t) => /^(https?:\/\/)?(share\.gemini\.google|share\.google)\/\S+/i.test(t))
+      .map((t) => (t.startsWith("http") ? t : `https://${t}`));
+    if (textLinks.length) {
+      closeOverlays();
+      return textLinks[textLinks.length - 1];
     }
     // 策略3：Gemini 可能在点击时直接复制到剪贴板（无用户激活时可能被拒，尽力而为）
     if (i === 6) {
@@ -492,33 +493,17 @@ async function clickShareAndGetLink() {
       } catch (e) { /* 剪贴板权限被拒，继续其他策略 */ }
     }
   }
-  throw new Error("点击分享后 15 秒内未拿到链接");
+  throw new Error("点击分享后 15 秒内未拿到链接（弹层若已打开则是提取策略未覆盖该 DOM，请截图发我）");
 }
 
 async function collectShareLink(page) {
   const shareUrl = await clickShareAndGetLink();
   log(`🔗 分享链接：${shareUrl}`, "green");
 
-  if (!S.editedFolderId) {
-    S.editedFolderId = (await bg({ type: "ensureFolder", parentId: S.folderId, name: "edited" })).id;
-    log("📁 已在 Drive 创建 edited/ 子目录", "blue");
-  }
-
   const target = S.images[page - 1];
-
-  // ① 云端完成标记：链接存成 edited/{原图名}.sharelink.txt
-  const markerName = `${target.base}.sharelink.txt`;
   const markerBody = `${target.name}\t${shareUrl}\n`;
-  await bg({
-    type: "upload",
-    folderId: S.editedFolderId,
-    name: markerName,
-    mime: "text/plain",
-    data: textToBase64(markerBody),
-  });
-  log(`☁️ 云端已标记完成: edited/${markerName}`, "green");
 
-  // ② 本地存档：Downloads/gemini_share_links/{原图名}.txt（内容同上，本地下载用）
+  // 本地存档：Downloads/gemini_share_links/{原图名}.txt（本地下载脚本的输入）
   try {
     const blob = new Blob([markerBody], { type: "text/plain" });
     const objUrl = URL.createObjectURL(blob);
@@ -531,47 +516,23 @@ async function collectShareLink(page) {
     setTimeout(() => URL.revokeObjectURL(objUrl), 60000);
     log("💾 链接已存本地: Downloads/gemini_share_links/", "green");
   } catch (e) {
-    log(`⚠️ 本地存档失败：${e.message}（云端已有备份，不影响流程）`, "amber");
+    log(`⚠️ 本地存档失败：${e.message}`, "amber");
   }
 
-  S.completed.add(page);
+  // 本地完成标记（按文件夹记账，持久化），下次扫描直接跳过
+  S.localDone.add(page);
   S.sessionCompleted.add(page);
+  const map = S.doneByFolder;
+  const arr = new Set(map[S.folderId] || []);
+  arr.add(page);
+  map[S.folderId] = [...arr].sort((a, b) => a - b);
+  S.doneByFolder = map;
+  chrome.storage.local.set({ donePagesByFolder: map });
+  log(`✅ 第 ${page} 页已本地标记完成`, "green");
 }
 
-// 每页跑完开启新对话：避免长会话内存膨胀和上下文污染。
-// 用户指定：新会话必须落在生图页 /images 上。
-// 若点击后 URL 不是 /images（或找不到按钮需强制跳转），会触发整页导航——
-// 状态机虽死，但 autoResume 标记会让重启后的脚本自动续跑。
-function findNewChatButton() {
-  const imgLink = document.querySelector("a[href='/images']");
-  if (imgLink) return imgLink;
-  const appLink = document.querySelector("a[href='/app']");
-  if (appLink) return appLink;
-  return [...document.querySelectorAll("button, a")].find((el) => {
-    const label = `${el.getAttribute("aria-label") || ""}${el.getAttribute("title") || ""}${el.textContent || ""}`;
-    return /new chat|新聊天|新对话/i.test(label) && el.offsetParent !== null;
-  }) || null;
-}
-
-async function startNewChat() {
-  const btn = findNewChatButton();
-  if (!btn) {
-    log("⚠️ 未找到「新聊天」按钮，3 秒后跳转生图页", "amber");
-    await sleep(NEW_CHAT_FALLBACK_DELAY_MS);
-    S.navigating = true; // 主动整页跳转：autoRun 的 finally 不清 autoResume，让新页面接管续跑
-    location.href = IMAGES_URL;
-    return;
-  }
-  btn.click();
-  await sleep(NEW_CHAT_BTN_WAIT_MS);
-  if (location.pathname.startsWith("/images")) {
-    log("🆕 已开启新对话（生图页）", "blue");
-  } else {
-    log("↪️ 转到生图页 /images（若整页跳转，重启后自动续跑）", "blue");
-    S.navigating = true;
-    location.href = IMAGES_URL;
-  }
-}
+// 注：整话跑在同一个 Gemini 会话里（用户指定），所有分享链接都留在该会话历史中，
+// 不再自动开新对话——会话长度换来的代价由用户接受。
 
 // ---------- 主流程 ----------
 
@@ -635,7 +596,6 @@ async function autoRun() {
   chrome.storage.local.set({ autoResume: true });
   render();
   try {
-    let pagesSinceChat = 0; // 每 PAGE_PER_CHAT 页换一次会话，同会话旧图靠快照排除
     while (!S.stopFlag) {
       // 扫描加重试：瞬时 Drive 网络错误不该杀掉整条链
       let loaded = false;
@@ -650,13 +610,7 @@ async function autoRun() {
       const page = S.current;
       try {
         await runPage(page);
-        pagesSinceChat++;
-        if (pagesSinceChat >= PAGE_PER_CHAT) {
-          await startNewChat();
-          pagesSinceChat = 0;
-        } else {
-          log(`📌 收图完成，同一会话继续（本轮已连跑 ${pagesSinceChat}/${PAGE_PER_CHAT} 页）`, "blue");
-        }
+        log("📌 收图完成，继续下一页（整话同一会话）", "blue");
       } catch (e) {
         log(`❌ 第 ${page} 页失败：${e.message}`, "red");
         log("已暂停。排查后可再点「发送本页」重试。", "amber");
@@ -666,8 +620,7 @@ async function autoRun() {
     }
   } finally {
     S.running = false;
-    // 主动发起整页跳转时不清 autoResume，让新页面接管续跑
-    if (!S.navigating) chrome.storage.local.set({ autoResume: false });
+    chrome.storage.local.set({ autoResume: false });
     render();
   }
 }
@@ -706,9 +659,11 @@ function render() {
   if (!panel) return;
   panel.querySelector(".gmh-page-input").value = String(S.current).padStart(3, "0");
   panel.querySelector(".gmh-total").textContent = `/ ${String(S.total).padStart(3, "0")}`;
-  const pct = S.total ? Math.round((S.completed.size / S.total) * 100) : 0;
+  let handled = 0;
+  for (let p = 1; p <= S.total; p++) if (isDone(p) && !S.skipped.has(p)) handled++;
+  const pct = S.total ? Math.round((handled / S.total) * 100) : 0;
   const skipExtra = S.skipped.size ? ` +跳过${S.skipped.size}` : "";
-  panel.querySelector(".gmh-progress-num").textContent = `${S.completed.size}/${S.total} (${pct}%)${skipExtra}`;
+  panel.querySelector(".gmh-progress-num").textContent = `${handled}/${S.total} (${pct}%)${skipExtra}`;
   panel.querySelector(".gmh-progress-fill").style.width = `${pct}%`;
   const img = S.images[S.current - 1];
   const state = S.skipped.has(S.current) ? "⏭ 已跳过" : isDone(S.current) ? "✓ 已完成" : "⏳ 待改图";
@@ -795,8 +750,10 @@ function buildPanel() {
 
 // ---------- 启动 ----------
 
-chrome.storage.local.get(["folderId", "autoResume", "skippedPages", "skippedFolderId"], (cfg) => {
+chrome.storage.local.get(["folderId", "autoResume", "skippedPages", "skippedFolderId", "donePagesByFolder"], (cfg) => {
   S.folderId = cfg.folderId || "";
+  S.doneByFolder = cfg.donePagesByFolder || {};
+  S.localDone = new Set(S.doneByFolder[S.folderId] || []);
   if (cfg.skippedFolderId === S.folderId) {
     S.skipped = new Set(cfg.skippedPages || []);
   } else {
@@ -820,6 +777,8 @@ chrome.storage.onChanged.addListener((changes) => {
     S.folderId = changes.folderId.newValue || "";
     S.skipped.clear();
     S.sessionCompleted.clear();
+    // 本地完成账本按文件夹各自保留，只切换视图，不清除
+    S.localDone = new Set((S.doneByFolder || {})[S.folderId] || []);
     S.promptsCacheId = "";
     S.promptsCache = null;
     chrome.storage.local.set({ skippedPages: [], skippedFolderId: S.folderId });
