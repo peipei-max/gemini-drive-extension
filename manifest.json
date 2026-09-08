@@ -3,7 +3,7 @@
   "name": "Gemini 漫画改图助手",
   "version": "0.1.0",
   "description": "Gemini 网页版漫画改图自动化：Drive 取原图 → 自动上传/填提示词/发送 → 自动收生成图归档到 Drive edited/ 目录",
-  "permissions": ["identity", "storage", "declarativeNetRequest"],
+  "permissions": ["identity", "storage", "declarativeNetRequest", "downloads"],
   "host_permissions": [
     "https://gemini.google.com/*",
     "https://www.googleapis.com/*",

@@ -31,7 +31,6 @@ const CANDIDATE_LOAD_TIMEOUT_MS = 30000;
 const CANDIDATE_CHECK_INTERVAL_MS = 1000;
 const CANDIDATE_STABLE_MS = 5000;
 const IMG_MIN_SIZE = 300;
-const IMG_MIN_FILE_SIZE = 1000; // bytes
 const SCROLL_INTERVAL_TICK = 10;
 const PAGE_PER_CHAT = 5;             // 每跑 N 页换一次会话
 const SLEEP_AFTER_SEND_MS = 2000;    // 发送后等页面进入生成态
@@ -429,7 +428,77 @@ async function waitForGenerated(timeoutMs = GENERATED_TIMEOUT_MS) {
   throw new Error(`等待生成超时（${GENERATED_TIMEOUT_MS/60000} 分钟），若图已生成请在日志排查`);
 }
 
-async function collectImages(srcs, page) {
+// ---------- 收图：分享链接方案 ----------
+// /images 面的生成图下载链是 cookie 门禁 + 浏览器原生下载也被拒（实测），
+// 直接抓字节走不通。改走分享链路：
+//   点图片上的分享按钮 -> 拿公开分享链接 -> ① 上传 Drive edited/ 作完成标记
+//   ② 存本地 Downloads/gemini_share_links/ 供之后逐一下载
+
+function textToBase64(s) {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+}
+
+function findShareButton() {
+  const root = lastModelResponse() || document;
+  const btns = [...root.querySelectorAll("button, a[role='button']")];
+  const matches = btns.filter((b) =>
+    /share|分享/i.test(`${b.getAttribute("aria-label") || ""}${b.getAttribute("mattooltip") || ""}${b.getAttribute("title") || ""}`) ||
+    b.querySelector("[class*='share' i], [data-icon*='share' i]")
+  );
+  return matches[matches.length - 1] || null;
+}
+
+function closeOverlays() {
+  document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+  const closeBtn = document.querySelector("[aria-label*='关闭'], [aria-label*='Close'], [data-test-id='dialog-close-button']");
+  if (closeBtn) closeBtn.click();
+}
+
+async function clickShareAndGetLink() {
+  const btn = findShareButton();
+  if (!btn) throw new Error("找不到分享按钮");
+  btn.scrollIntoView({ block: "center", behavior: "instant" });
+  await sleep(500);
+  btn.click();
+  log("🔗 已点击分享", "blue");
+
+  // 多策略拿链接，最多 15 秒
+  for (let i = 0; i < 30; i++) {
+    await sleep(500);
+    // 策略1：弹层里的输入框/文本域已带链接值
+    const inputs = [...document.querySelectorAll("input[type='text'], textarea")]
+      .map((el) => (el.value || "").trim())
+      .filter((v) => /^https?:\/\//.test(v));
+    if (inputs.length) {
+      closeOverlays();
+      return inputs.sort((a, b) => b.length - a.length)[0];
+    }
+    // 策略2：分享弹层里出现链接锚点
+    const anchors = [...document.querySelectorAll("a[href^='https://']")
+      ].map((a) => a.href)
+      .filter((h) => /share\.google|g\.co|goo\.gl|gemini\.google\.com\/share/.test(h));
+    if (anchors.length) {
+      closeOverlays();
+      return anchors[0];
+    }
+    // 策略3：Gemini 可能在点击时直接复制到剪贴板（无用户激活时可能被拒，尽力而为）
+    if (i === 6) {
+      try {
+        const clip = await navigator.clipboard.readText();
+        if (/^https?:\/\//.test(clip.trim())) {
+          closeOverlays();
+          return clip.trim();
+        }
+      } catch (e) { /* 剪贴板权限被拒，继续其他策略 */ }
+    }
+  }
+  throw new Error("点击分享后 15 秒内未拿到链接");
+}
+
+async function collectShareLink(page) {
+  const shareUrl = await clickShareAndGetLink();
+  log(`🔗 分享链接：${shareUrl}`, "green");
+
   if (!S.editedFolderId) {
     S.editedFolderId = (await bg({ type: "ensureFolder", parentId: S.folderId, name: "edited" })).id;
     log("📁 已在 Drive 创建 edited/ 子目录", "blue");
@@ -437,68 +506,36 @@ async function collectImages(srcs, page) {
 
   const target = S.images[page - 1];
 
-  // 挑尺寸最大的那张。
-  // 优先页面内 canvas 抓取：带 cookie（和页面 <img> 加载行为一致），
-  // 配合 DNR 注入的 ACAO 头 canvas 不会被污染；gg-dl 这类 cookie 门禁的下载链只有这条路能走。
-  // canvas 失败再走后台 fetch 兜底（跨域豁免，但可能 403）。
-  // blob:/data: 是页面内部 URL，后台摸不到，只能 canvas。
-  let best = null;
-  for (const src of srcs) {
-    try {
-      let r;
-      try {
-        r = await canvasGrab(src);
-      } catch (e1) {
-        if (src.startsWith("blob:") || src.startsWith("data:")) throw e1;
-        r = await bg({ type: "fetchImage", url: src });
-      }
-      if (!best || r.size > best.size) best = r;
-    } catch (e) {
-      log(`⚠️ 一张候选图抓取失败：${e.message}`, "amber");
-    }
-  }
-  if (!best || best.size < IMG_MIN_FILE_SIZE) throw new Error("未能抓到生成图（抓图失败或全是小图）");
+  // ① 云端完成标记：链接存成 edited/{原图名}.sharelink.txt
+  const markerName = `${target.base}.sharelink.txt`;
+  const markerBody = `${target.name}\t${shareUrl}\n`;
+  await bg({
+    type: "upload",
+    folderId: S.editedFolderId,
+    name: markerName,
+    mime: "text/plain",
+    data: textToBase64(markerBody),
+  });
+  log(`☁️ 云端已标记完成: edited/${markerName}`, "green");
 
-  const ext = mimeToExt(best.mime);
-  const dstName = `${target.base}${ext}`;
-  await bg({ type: "upload", folderId: S.editedFolderId, name: dstName, mime: best.mime, data: best.data });
+  // ② 本地存档：Downloads/gemini_share_links/{原图名}.txt（内容同上，本地下载用）
+  try {
+    const blob = new Blob([markerBody], { type: "text/plain" });
+    const objUrl = URL.createObjectURL(blob);
+    await chrome.downloads.download({
+      url: objUrl,
+      filename: `gemini_share_links/${target.base}.txt`,
+      conflictAction: "overwrite",
+      saveAs: false,
+    });
+    setTimeout(() => URL.revokeObjectURL(objUrl), 60000);
+    log("💾 链接已存本地: Downloads/gemini_share_links/", "green");
+  } catch (e) {
+    log(`⚠️ 本地存档失败：${e.message}（云端已有备份，不影响流程）`, "amber");
+  }
+
   S.completed.add(page);
   S.sessionCompleted.add(page);
-  log(`🎉 已上传 Drive: edited/${dstName}（${Math.round(best.size / 1024)} KB）`, "green");
-}
-
-function mimeToExt(mime) {
-  if (/jpeg/.test(mime)) return ".jpg";
-  if (/webp/.test(mime)) return ".webp";
-  return ".png";
-}
-
-// 页面内 canvas 导出。crossOrigin=anonymous + DNR 注入的 ACAO 头，
-// 让远程图也能无污染导出；blob:/data: 同源天然可导
-function canvasGrab(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      try {
-        const c = document.createElement("canvas");
-        c.width = img.naturalWidth;
-        c.height = img.naturalHeight;
-        c.getContext("2d").drawImage(img, 0, 0);
-        c.toBlob((b) => {
-          if (!b) return reject(new Error("canvas 导出失败（可能被跨域污染）"));
-          const r = new FileReader();
-          r.onload = () => resolve({ data: String(r.result).split(",")[1], mime: b.type, size: b.size });
-          r.onerror = () => reject(new Error("base64 转换失败"));
-          r.readAsDataURL(b);
-        }, "image/png");
-      } catch (e) {
-        reject(e);
-      }
-    };
-    img.onerror = () => reject(new Error(`图片加载失败: ${src.slice(0, 60)}`));
-    img.src = src;
-  });
 }
 
 // 每页跑完开启新对话：避免长会话内存膨胀和上下文污染。
@@ -570,22 +607,22 @@ async function runPage(page) {
   await sleep(SLEEP_AFTER_SEND_MS); // 等请求真正发出、页面进入生成态
 
   const srcs = await waitForGenerated();
+  if (!srcs.length) log("⚠️ 未检测到新图（可能判定失误），仍尝试走分享流程", "amber");
 
-  // 收图带重试：签名 URL 会轮换/瞬时 403，重试时重新检测最新候选图
+  // 收图改走分享链接：点分享 -> 拿公开链接 -> 云端标记 + 本地存档。
+  // 重试时先关掉可能残留的弹层再重新找按钮
   for (let attempt = 0; attempt < MAX_COLLECT_RETRY; attempt++) {
     if (attempt > 0) {
-      log(`🔄 收图重试（${attempt + 1}/${MAX_COLLECT_RETRY}，重新检测候选图）...`, "amber");
+      log(`🔄 分享收图重试（${attempt + 1}/${MAX_COLLECT_RETRY}）...`, "amber");
+      closeOverlays();
       await sleep(SLEEP_AFTER_COLLECT_MS);
     }
-    const grabSrcs = attempt === 0
-      ? srcs
-      : [...new Set(findGeneratedCandidates().map((i) => i.currentSrc || i.src))];
     try {
-      await collectImages(grabSrcs, page);
+      await collectShareLink(page);
       break;
     } catch (e) {
       log(`⚠️ ${e.message}`, "amber");
-      if (attempt === MAX_COLLECT_RETRY - 1) throw new Error(`收图连续失败（已重试 ${MAX_COLLECT_RETRY} 次）`);
+      if (attempt === MAX_COLLECT_RETRY - 1) throw new Error(`分享收图连续失败（已重试 ${MAX_COLLECT_RETRY} 次）`);
     }
   }
 }
